@@ -11,15 +11,23 @@ app.use(cors());
 const db = new sqlite3.Database('./wm.db');
 const SECRET = "wmsecretkey";
 
-// ====== CREATE ALL TABLES ======
+// ====== CREATE ALL TABLES + ADD NEW COLUMNS ======
 db.serialize(() => {
   db.run(`CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT,
+    username TEXT UNIQUE,
     email TEXT UNIQUE,
     password TEXT,
     verified INTEGER DEFAULT 0,
-    banned INTEGER DEFAULT 0
+    banned INTEGER DEFAULT 0,
+    bio TEXT DEFAULT "",
+    avatar TEXT DEFAULT "",
+    dob TEXT,
+    gender TEXT,
+    phone TEXT,
+    location TEXT,
+    photos TEXT
   )`);
 
   db.run(`CREATE TABLE IF NOT EXISTS posts (
@@ -27,6 +35,7 @@ db.serialize(() => {
     userId INTEGER,
     content TEXT,
     imageUrl TEXT,
+    location TEXT,
     likes INTEGER DEFAULT 0,
     createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
   )`);
@@ -87,10 +96,11 @@ function auth(req, res, next){
 
 // ====== AUTH ROUTES ======
 app.post('/signup', async (req,res) => {
-  const {name, email, password} = req.body;
+  const {name, username, email, password, dob, gender, phone, location, photos} = req.body;
   const hash = await bcrypt.hash(password, 10);
-  db.run('INSERT INTO users (name,email,password) VALUES (?,?,?)', [name,email,hash], (err) => {
-    if(err) return res.status(400).json({success: false, error: "Email already exists"});
+  db.run('INSERT INTO users (name,username,email,password,dob,gender,phone,location,photos) VALUES (?,?,?,?,?,?,?,?,?)',
+  [name,username,email,hash,dob,gender,phone,location,JSON.stringify(photos||[])], (err) => {
+    if(err) return res.status(400).json({success: false, error: "Email/Username already exists"});
     res.json({success: true, message: "Account created"});
   });
 });
@@ -109,8 +119,9 @@ app.post('/login', (req,res) => {
 
 // ====== POSTS ======
 app.post('/posts', auth, (req,res) => {
-  const {content, imageUrl} = req.body;
-  db.run('INSERT INTO posts (userId, content, imageUrl) VALUES (?,?,?)', [req.userId, content, imageUrl||""], function(err){
+  const {content, imageUrl, location} = req.body;
+  db.run('INSERT INTO posts (userId, content, imageUrl, location) VALUES (?,?,?,?)',
+  [req.userId, content, imageUrl||"", location||""], function(err){
     if(err) return res.status(400).json({success: false, error: err.message});
     res.json({success: true, postId: this.lastID});
   });
@@ -122,11 +133,23 @@ app.get('/posts', auth, (req,res) => {
   });
 });
 
+// ====== 1. DELETE POST ======
+app.delete('/posts/:id', auth, (req,res) => {
+  const postId = req.params.id;
+  db.run('DELETE FROM posts WHERE id =? AND userId =?', [postId, req.userId], function(err){
+    if(this.changes === 0) return res.status(403).json({success: false, error: "Not allowed"});
+    db.run('DELETE FROM comments WHERE postId =?', [postId]);
+    db.run('DELETE FROM likes WHERE postId =?', [postId]);
+    res.json({success: true, message: "Post deleted"});
+  });
+});
+
 // ====== LIKE ======
 app.post('/posts/like', auth, (req,res) => {
   const {postId} = req.body;
   db.run('INSERT OR IGNORE INTO likes (userId, postId) VALUES (?,?)', [req.userId, postId], (err) => {
     db.run('UPDATE posts SET likes = likes + 1 WHERE id =?', [postId]);
+    db.run('INSERT INTO notifications (userId, text) SELECT userId, "liked your post" FROM posts WHERE id =?', [postId]);
     res.json({success: true});
   });
 });
@@ -135,6 +158,7 @@ app.post('/posts/like', auth, (req,res) => {
 app.post('/comments', auth, (req,res) => {
   const {postId, text} = req.body;
   db.run('INSERT INTO comments (postId, userId, text) VALUES (?,?,?)', [postId, req.userId, text], function(err){
+    db.run('INSERT INTO notifications (userId, text) SELECT userId, "commented on your post" FROM posts WHERE id =?', [postId]);
     res.json({success: true});
   });
 });
@@ -193,11 +217,17 @@ app.post('/notifications/read', auth, (req,res) => {
   res.json({success: true});
 });
 
-// ====== ADMIN ======
+// ====== 2. ADMIN BAN/VERIFY/UNBAN/UNVERIFY ======
 app.post('/admin/ban', auth, (req,res) => {
   const {userId} = req.body;
   db.run('UPDATE users SET banned = 1 WHERE id =?', [userId]);
   res.json({success: true, message: "User banned"});
+});
+
+app.post('/admin/unban', auth, (req,res) => {
+  const {userId} = req.body;
+  db.run('UPDATE users SET banned = 0 WHERE id =?', [userId]);
+  res.json({success: true, message: "User unbanned"});
 });
 
 app.post('/admin/verify', auth, (req,res) => {
@@ -206,7 +236,23 @@ app.post('/admin/verify', auth, (req,res) => {
   res.json({success: true, message: "User verified"});
 });
 
-app.get('/', (req,res) => res.send("wm backend is running 🚀"));
+app.post('/admin/unverify', auth, (req,res) => {
+  const {userId} = req.body;
+  db.run('UPDATE users SET verified = 0 WHERE id =?', [userId]);
+  res.json({success: true, message: "User unverified"});
+});
+
+// ====== 3. PROFILE EDIT ======
+app.post('/profile/update', auth, (req,res) => {
+  const {name, username, bio, avatar, dob, gender, phone, location, photos} = req.body;
+  db.run(`UPDATE users SET name=?, username=?, bio=?, avatar=?, dob=?, gender=?, phone=?, location=?, photos=? WHERE id=?`,
+  [name, username, bio, avatar, dob, gender, phone, location, JSON.stringify(photos||[]), req.userId], (err) => {
+    if(err) return res.status(400).json({success: false, error: err.message});
+    res.json({success: true, message: "Profile updated"});
+  });
+});
+
+app.get('/', (req,res) => res.send("wm backend is running "));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on ${PORT}`));
